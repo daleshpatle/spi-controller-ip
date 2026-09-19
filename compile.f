@@ -1,0 +1,11 @@
+rtl/spi_pkg.sv
+rtl/spi_cdc_prims.sv
+rtl/spi_async_fifo.sv
+rtl/spi_cfg_latch.sv
+rtl/spi_clkgen.sv
+rtl/spi_master_engine.sv
+rtl/spi_slave_engine.sv
+rtl/spi_swrst_ctrl.sv
+rtl/spi_regfile.sv
+rtl/spi_controller_top.sv
+tb/tb_spi_controller.sv

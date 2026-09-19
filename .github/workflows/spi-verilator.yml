@@ -1,0 +1,51 @@
+name: Verilator
+
+on:
+  push:
+    paths: ['rtl/**', 'tb/**', 'Makefile', 'compile*.f', '.github/workflows/spi-verilator.yml']
+  pull_request:
+    paths: ['rtl/**', 'tb/**', 'Makefile', 'compile*.f', '.github/workflows/spi-verilator.yml']
+  workflow_dispatch:
+
+jobs:
+  simulate:
+    name: Lint + regression
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Verilator
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq verilator
+          verilator --version
+
+      - name: Lint
+        run: make lint
+
+      # $finish always exits 0, so the log text is what gates the job.
+      - name: Smoke test
+        run: |
+          set -o pipefail
+          make smoke 2>&1 | tee smoke.log
+          grep -q "ALL CHECKS PASSED" smoke.log
+
+      - name: Mode / bit-order / DFS sweep
+        run: |
+          set -o pipefail
+          make modes 2>&1 | tee modes.log
+          grep -q "ALL MODES PASS" modes.log
+
+      - name: Upload simulation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-logs
+          path: |
+            smoke.log
+            modes.log
+          if-no-files-found: ignore

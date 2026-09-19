@@ -55,3 +55,46 @@ Key design decisions documented in the spec:
 
 **Dalesh Patle** — Design Verification Engineer | M.Tech, IIT Guwahati
 [LinkedIn](https://www.linkedin.com/in/dalesh-patle-134b80232)
+
+[![Verilator](https://github.com/daleshpatle/spi-controller-ip/actions/workflows/spi-verilator.yml/badge.svg)](https://github.com/daleshpatle/spi-controller-ip/actions/workflows/spi-verilator.yml)
+
+## Simulation
+
+### Verilator (open source, no licence)
+
+Requires **Verilator 5.x** — `--timing` and `--binary` do not exist in 4.x.
+
+```sh
+sudo apt install verilator gtkwave     # Ubuntu 24.04 ships 5.020
+
+make            # smoke test
+make modes      # mode / bit-order / DFS sweep
+make lint       # lint only
+make wave       # smoke test + tb_spi_controller.vcd
+```
+
+### Xcelium
+
+```sh
+xrun -f compile.f       -top tb_spi_controller -access +r -l xrun.log
+xrun -f compile_modes.f -top tb_modes          -access +r -l xrun_modes.log
+```
+
+The testbenches drive APB stimulus a delta after the clock edge
+(`@(posedge pclk); #1; psel = 1;`) rather than with non-blocking assignments.
+Verilator does not implement the NBA region inside `initial` blocks or tasks
+called from them, so `psel <= 1` executes as a blocking assignment and races the
+DUT flops on that same edge — which silently drops the first TX word. Driving
+after a small delay is simulator-neutral and gives identical results under
+Verilator, Icarus and event-driven signoff tools.
+
+## Verification status
+
+| Test | Coverage | Result |
+|---|---|---|
+| `tb_spi_controller` | Reset values, `PSLVERR` rules, `DFS` range rejection, always-writable `SPI_CTRL`, loopback data integrity, DMA gating and the interrupt interlock, software-reset sequence | **ALL CHECKS PASSED** |
+| `tb_modes` | 4 SPI modes x MSB/LSB x DFS in {4, 8, 16} through loopback | **24 / 24** |
+
+Cross-verified on Verilator 5.x, Icarus Verilog 12.0 and Cadence Xcelium.
+`verilator --lint-only -Wall` is clean apart from three waived informational
+categories (`DECLFILENAME`, `UNUSEDSIGNAL`, `BLKSEQ`).
