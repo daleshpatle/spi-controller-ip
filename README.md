@@ -2,6 +2,8 @@
 SPI Controller IP with production-grade CDC architecture — multi-flop, event, and handshake synchronization with full spec documentation
 # SPI Controller IP — Multi-Clock-Domain Design with Rigorous CDC Architecture
 
+[![Verilator](https://github.com/daleshpatle/spi-controller-ip/actions/workflows/spi-verilator.yml/badge.svg)](https://github.com/daleshpatle/spi-controller-ip/actions/workflows/spi-verilator.yml)
+
 A company-grade SPI (Serial Peripheral Interface) Controller IP supporting Master and Slave modes, designed with a production-quality Clock Domain Crossing (CDC) architecture and a full documentation suite (specification, architecture diagrams, and verified timing diagrams).
 
 > **Why this project:** Most student SPI cores ignore CDC entirely. This IP treats CDC as a first-class design problem — every domain boundary is identified, classified, and closed with the appropriate synchronization technique, following industry practice (Cummings, SNUG papers).
@@ -47,16 +49,16 @@ Key design decisions documented in the spec:
 
 ## Verification
 
-- Directed and randomized stimulus in SystemVerilog
-- Simulation-verified waveforms for all SPI modes and CDC corner cases (config change during transaction, back-to-back transfers, slave-side asynchronous SCLK)
-- Simulator: Mentor QuestaSim
+- Directed, self-checking SystemVerilog testbenches, run in CI on every push
+- Mode sweep: 4 SPI modes x MSB/LSB x DFS in {4, 8, 16} through loopback — 24/24 passing
+- Back-to-back multi-word transfers, APB error protocol, DMA/interrupt interlock, software reset
+- Simulators: Verilator 5.x, Icarus Verilog 12.0
+- Not yet covered: slave-mode transfers, configuration change mid-frame
 
 ## Author
 
 **Dalesh Patle** — Design Verification Engineer | M.Tech, IIT Guwahati
 [LinkedIn](https://www.linkedin.com/in/dalesh-patle-134b80232)
-
-[![Verilator](https://github.com/daleshpatle/spi-controller-ip/actions/workflows/spi-verilator.yml/badge.svg)](https://github.com/daleshpatle/spi-controller-ip/actions/workflows/spi-verilator.yml)
 
 ## Simulation
 
@@ -95,6 +97,6 @@ Verilator, Icarus and event-driven signoff tools.
 | `tb_spi_controller` | Reset values, `PSLVERR` rules, `DFS` range rejection, always-writable `SPI_CTRL`, loopback data integrity, DMA gating and the interrupt interlock, software-reset sequence | **ALL CHECKS PASSED** |
 | `tb_modes` | 4 SPI modes x MSB/LSB x DFS in {4, 8, 16} through loopback | **24 / 24** |
 
-Cross-verified on Verilator 5.x, Icarus Verilog 12.0 and Cadence Xcelium.
+Cross-verified on Verilator 5.x and Icarus Verilog 12.0.
 `verilator --lint-only -Wall` is clean apart from three waived informational
 categories (`DECLFILENAME`, `UNUSEDSIGNAL`, `BLKSEQ`).
