@@ -83,6 +83,12 @@ module spi_slave_engine
   logic                  tx_started_x;
   logic                  underrun_tgl_x;
 
+  // CS_n is deliberately used two ways: as the ASYNC clear of the SCLK-domain
+  // frame logic below (SCLK stops when CS deasserts, so no clock edge is left
+  // for a synchronous reset), and as DATA into a 2-FF synchronizer for BUSY /
+  // FRAME_ERR. Reset release (CS asserting) is async to SCLK; recovery timing
+  // is met by the SPI CS-to-first-SCLK setup time (t_CSS) the master guarantees.
+  /* verilator lint_off SYNCASYNCNET */
   // ---- receive: sample on the rising edge of sclk_sample ----
   always_ff @(posedge sclk_sample or posedge cs_inactive) begin
     if (cs_inactive) begin
@@ -128,6 +134,8 @@ module spi_slave_engine
       if (!tx_hold_vld) underrun_tgl_x <= ~underrun_tgl_x;
     end
   end
+
+  /* verilator lint_on SYNCASYNCNET */
 
   assign miso_o = cs_inactive ? 1'b1
                 : (cfg.lsbfirst ? tx_sr_x[0] : tx_sr_x[DATA_WIDTH-1]);

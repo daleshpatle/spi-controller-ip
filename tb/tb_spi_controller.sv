@@ -14,12 +14,12 @@ module tb_spi_controller;
   localparam int DEPTH = 8;
   localparam int NCS   = 4;
 
-  logic pclk = 0, presetn = 0;
-  logic spi_ref_clk = 0, spi_rst_n = 0;
+ logic pclk, presetn = 0;
+  logic spi_ref_clk, spi_rst_n = 0;
+  initial begin pclk        = 1'b0; forever #5  pclk        = ~pclk;        end
+  initial begin spi_ref_clk = 1'b0; forever #17 spi_ref_clk = ~spi_ref_clk; end
 
-  // deliberately unrelated clock periods - the domains are asynchronous
-  always #5    pclk        = ~pclk;         // 100 MHz
-  always #17   spi_ref_clk = ~spi_ref_clk;  //  ~29 MHz
+
 
   logic        psel=0, penable=0, pwrite=0;
   logic [7:0]  paddr=0;
@@ -168,7 +168,9 @@ module tb_spi_controller;
     check("SWRST always reads back 0", rd[14]===1'b0);
 
     begin
-      int guard = 0;
+     int guard;
+      guard = 0;
+
       do begin
         apb_read(8'h04, rd, er);
         guard++;
