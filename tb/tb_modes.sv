@@ -3,9 +3,9 @@
 // DFS-driven frame termination for every combination.
 `timescale 1ns/1ps
 module tb_modes;
-  logic pclk=0, presetn=0, spi_ref_clk=0, spi_rst_n=0;
-  always #5  pclk        = ~pclk;
-  always #17 spi_ref_clk = ~spi_ref_clk;
+  logic pclk, presetn=0, spi_ref_clk, spi_rst_n=0;
+  initial begin pclk        = 1'b0; forever #5  pclk        = ~pclk;        end
+  initial begin spi_ref_clk = 1'b0; forever #17 spi_ref_clk = ~spi_ref_clk; end
 
   logic psel=0,penable=0,pwrite=0; logic [7:0] paddr=0;
   logic [31:0] pwdata=0, prdata; logic pready, pslverr;

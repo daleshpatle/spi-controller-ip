@@ -18,7 +18,6 @@ VFLAGS += --timescale 1ns/1ps          # RTL files carry no `timescale
 VFLAGS += -Wall -Wno-fatal
 VFLAGS += -Wno-DECLFILENAME            # spi_cdc_prims.sv holds 3 modules
 VFLAGS += -Wno-UNUSEDSIGNAL            # unused status/level bits
-VFLAGS += -Wno-BLKSEQ                  # blocking assign in TB clock generators
 VFLAGS += -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND
 
 .PHONY: all smoke modes lint wave wave-modes clean
@@ -37,7 +36,7 @@ modes:
 
 lint:
 	$(VERILATOR) --lint-only --timing --timescale 1ns/1ps -Wall -Wno-fatal \
-	    -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-BLKSEQ \
+	    -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
 	    --top-module tb_spi_controller -f compile.f
 
 wave:
