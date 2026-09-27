@@ -149,24 +149,29 @@ module spi_slave_engine
   // ------------------------------------------------------------------
   // The toggle is generated in the external-SCLK domain above, so only the
   // destination half of the event synchronizer is needed here: 2-FF sync
-  // plus the 2-cycle edge detect of Spec 5.2.
+  // plus a ONE-cycle edge detect. Not the 2-cycle output of spi_event_sync
+  // (Spec 5.2): word_rdy is the RX FIFO write enable and the TX handshake,
+  // and evt_done / evt_rx_overrun / evt_tx_underrun feed toggle-type event
+  // synchronizers. All of them act once per cycle, so a 2-cycle pulse wrote
+  // every word twice and toggled every event twice (the second toggle
+  // cancels the first, so a slow pclk could miss the event).
   logic word_rdy;
   (* ASYNC_REG = "TRUE" *) logic fq1, fq2;
-  logic fqd1, fqd2;
+  logic fqd1;
   always_ff @(posedge spi_clk or negedge spi_rst_n) begin
-    if (!spi_rst_n) {fqd2, fqd1, fq2, fq1} <= 4'b0000;
-    else            {fqd2, fqd1, fq2, fq1} <= {fqd1, fq2, fq1, frame_tgl_x};
+    if (!spi_rst_n) {fqd1, fq2, fq1} <= 3'b000;
+    else            {fqd1, fq2, fq1} <= {fq2, fq1, frame_tgl_x};
   end
-  assign word_rdy = (fq2 ^ fqd1) | (fqd1 ^ fqd2);
+  assign word_rdy = fq2 ^ fqd1;             // exactly one spi_clk cycle per word
 
-  // underrun event synchronized the same way
+  // underrun event synchronized the same way (one cycle per toggle)
   (* ASYNC_REG = "TRUE" *) logic uq1, uq2;
-  logic uqd1, uqd2;
+  logic uqd1;
   always_ff @(posedge spi_clk or negedge spi_rst_n) begin
-    if (!spi_rst_n) {uqd2, uqd1, uq2, uq1} <= 4'b0000;
-    else            {uqd2, uqd1, uq2, uq1} <= {uqd1, uq2, uq1, underrun_tgl_x};
+    if (!spi_rst_n) {uqd1, uq2, uq1} <= 3'b000;
+    else            {uqd1, uq2, uq1} <= {uq2, uq1, underrun_tgl_x};
   end
-  assign evt_tx_underrun = (uq2 ^ uqd1) | (uqd1 ^ uqd2);
+  assign evt_tx_underrun = uq2 ^ uqd1;
 
   // chip-select and partial-word status, synchronized for framing errors
   logic cs_n_sync, cs_n_sync_q, partial_sync;
