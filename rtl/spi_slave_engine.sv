@@ -77,68 +77,86 @@ module spi_slave_engine
   logic [DATA_WIDTH-1:0] rx_sr_x;
   logic [DATA_WIDTH-1:0] tx_sr_x;
   logic [5:0]            bitcnt_x;
-  logic [5:0]            dfs_frame;     // DFS frozen at frame start
+  logic [5:0]            dfs_frame;     // DFS frozen on the first edge of a frame
+  logic                  rx_active_x;   // 0 until the first sample edge of a frame
+  logic                  tx_loaded_x;   // 0 until the first drive edge of a frame
   logic                  frame_tgl_x;   // toggles on each completed word
   logic [DATA_WIDTH-1:0] hold_x;        // completed word, held stable
-  logic                  tx_started_x;
   logic                  underrun_tgl_x;
 
-  // CS_n is deliberately used two ways: as the ASYNC clear of the SCLK-domain
-  // frame logic below (SCLK stops when CS deasserts, so no clock edge is left
-  // for a synchronous reset), and as DATA into a 2-FF synchronizer for BUSY /
-  // FRAME_ERR. Reset release (CS asserting) is async to SCLK; recovery timing
-  // is met by the SPI CS-to-first-SCLK setup time (t_CSS) the master guarantees.
+  // DFS for this edge: live cfg on the first edge of a frame, frozen copy after
+  logic [5:0] dfs_now;
+  assign dfs_now = rx_active_x ? dfs_frame : cfg.dfs;
+
+  logic last_bit_x;                     // this sample edge completes a word
+  assign last_bit_x = !cs_inactive && (bitcnt_x == dfs_now - 6'd1);
+
+  logic [DATA_WIDTH-1:0] tx_word;       // next TX word, aligned for shifting out
+  assign tx_word = tx_hold_vld
+                 ? (cfg.lsbfirst ? tx_hold : (tx_hold << (DATA_WIDTH - 32'(cfg.dfs))))
+                 : {DATA_WIDTH{1'b1}};  // idle value on underrun
+
+  logic [DATA_WIDTH-1:0] tx_cur;        // what MISO is shifting out right now
+  assign tx_cur = tx_loaded_x ? tx_sr_x : tx_word;
+
+  // Per-frame state: async reset on power-on OR CS_n high, constant 0 only.
+  // The two toggles: power-on reset only (a CS_n reset would look like an event).
+  // CS_n is also used as data (gating, BUSY/FRAME_ERR sync); release timing is
+  // met by the master's CS-to-first-SCLK setup time (t_CSS).
   /* verilator lint_off SYNCASYNCNET */
   // ---- receive: sample on the rising edge of sclk_sample ----
-  always_ff @(posedge sclk_sample or posedge cs_inactive) begin
-    if (cs_inactive) begin
-      rx_sr_x     <= '0;
-      bitcnt_x    <= 6'd0;
-      dfs_frame   <= cfg.dfs;           // freeze DFS for the whole frame
-      frame_tgl_x <= frame_tgl_x;       // preserved across frames
-      hold_x      <= hold_x;
-    end else begin
-      rx_sr_x <= cfg.lsbfirst ? {mosi_i, rx_sr_x[DATA_WIDTH-1:1]}
-                              : {rx_sr_x[DATA_WIDTH-2:0], mosi_i};
-      if (bitcnt_x == dfs_frame - 6'd1) begin
-        bitcnt_x    <= 6'd0;
-        hold_x      <= cfg.lsbfirst
-                     ? ({mosi_i, rx_sr_x[DATA_WIDTH-1:1]} >> (DATA_WIDTH - 32'(dfs_frame)))
-                     : ({rx_sr_x[DATA_WIDTH-2:0], mosi_i} & ((1 << dfs_frame) - 1));
-        frame_tgl_x <= ~frame_tgl_x;    // request: a word is ready
-      end else begin
-        bitcnt_x <= bitcnt_x + 6'd1;
-      end
+  always_ff @(posedge sclk_sample or posedge cs_inactive or negedge spi_rst_n) begin
+    if (!spi_rst_n)       {rx_active_x, dfs_frame, bitcnt_x, rx_sr_x} <= '0;
+    else if (cs_inactive) {rx_active_x, dfs_frame, bitcnt_x, rx_sr_x} <= '0;
+    else begin
+      rx_active_x <= 1'b1;
+      if (!rx_active_x) dfs_frame <= cfg.dfs;   // freeze DFS for the whole frame
+      rx_sr_x  <= cfg.lsbfirst ? {mosi_i, rx_sr_x[DATA_WIDTH-1:1]}
+                               : {rx_sr_x[DATA_WIDTH-2:0], mosi_i};
+      bitcnt_x <= last_bit_x ? 6'd0 : bitcnt_x + 6'd1;
+    end
+  end
+
+  // completed word and its toggle: power-on reset only
+  always_ff @(posedge sclk_sample or negedge spi_rst_n) begin
+    if (!spi_rst_n) begin
+      frame_tgl_x <= 1'b0;
+      hold_x      <= '0;
+    end else if (last_bit_x) begin
+      hold_x      <= cfg.lsbfirst
+                   ? ({mosi_i, rx_sr_x[DATA_WIDTH-1:1]} >> (DATA_WIDTH - 32'(dfs_now)))
+                   : ({rx_sr_x[DATA_WIDTH-2:0], mosi_i} & ((1 << dfs_now) - 1));
+      frame_tgl_x <= ~frame_tgl_x;      // request: a word is ready
     end
   end
 
   // ---- transmit: drive on the opposite edge ----
-  // At chip-select deassertion the shift register is pre-loaded, so the
-  // first bit is already present on MISO before the first clock edge.
-  // That is what CPHA=0 requires. For CPHA=1 the first drive edge only
-  // presents the bit without advancing (tx_started_x).
-  always_ff @(negedge sclk_sample or posedge cs_inactive) begin
-    if (cs_inactive) begin
-      tx_sr_x        <= tx_hold_vld
-                      ? (cfg.lsbfirst ? tx_hold : (tx_hold << (DATA_WIDTH - 32'(cfg.dfs))))
-                      : {DATA_WIDTH{1'b1}};       // idle value on underrun
-      tx_started_x   <= 1'b0;
-      underrun_tgl_x <= underrun_tgl_x;
-    end else begin
-      if (cfg.cpha && !tx_started_x) begin
-        tx_started_x <= 1'b1;                     // present bit 0, do not advance
-      end else begin
-        tx_sr_x <= cfg.lsbfirst ? {1'b1, tx_sr_x[DATA_WIDTH-1:1]}
-                                : {tx_sr_x[DATA_WIDTH-2:0], 1'b1};
-      end
-      if (!tx_hold_vld) underrun_tgl_x <= ~underrun_tgl_x;
+  // Before the first drive edge MISO shows the first bit straight from tx_word.
+  // The first drive edge loads the shift register (CPHA=0: already advanced
+  // one bit; CPHA=1: not advanced, that edge only presents the first bit).
+  always_ff @(negedge sclk_sample or posedge cs_inactive or negedge spi_rst_n) begin
+    if (!spi_rst_n)       {tx_loaded_x, tx_sr_x} <= '0;
+    else if (cs_inactive) {tx_loaded_x, tx_sr_x} <= '0;
+    else begin
+      tx_loaded_x <= 1'b1;
+      if (cfg.cpha && !tx_loaded_x)
+        tx_sr_x <= tx_word;                       // present bit 0, do not advance
+      else
+        tx_sr_x <= cfg.lsbfirst ? {1'b1, tx_cur[DATA_WIDTH-1:1]}
+                                : {tx_cur[DATA_WIDTH-2:0], 1'b1};
     end
+  end
+
+  // underrun toggle: power-on reset only
+  always_ff @(negedge sclk_sample or negedge spi_rst_n) begin
+    if (!spi_rst_n)                         underrun_tgl_x <= 1'b0;
+    else if (!cs_inactive && !tx_hold_vld)  underrun_tgl_x <= ~underrun_tgl_x;
   end
 
   /* verilator lint_on SYNCASYNCNET */
 
   assign miso_o = cs_inactive ? 1'b1
-                : (cfg.lsbfirst ? tx_sr_x[0] : tx_sr_x[DATA_WIDTH-1]);
+                : (cfg.lsbfirst ? tx_cur[0] : tx_cur[DATA_WIDTH-1]);
 
   // partial word present - used to flag a framing error at CS deassertion
   logic partial_x;
