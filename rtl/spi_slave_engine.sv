@@ -18,11 +18,11 @@
 // constrained accordingly.
 //
 // DFS snapshot. The bit counter lives in the external-SCLK domain but
-// DFS lives in cfg_active (spi_ref_clk). DFS is frozen into dfs_frame
-// while chip-select is inactive, so the counter compares against a value
-// that is constant for the whole frame. No multi-bit synchronizer is
-// required - and none would be correct, because it would introduce bit
-// skew across the DFS field.
+// DFS lives in cfg_active (spi_ref_clk). DFS is frozen into dfs_frame on
+// the first SCLK edge of each frame, so the counter compares against a
+// value that is constant for the whole frame. No multi-bit synchronizer
+// is required - and none would be correct, because it would introduce
+// bit skew across the DFS field.
 //======================================================================
 module spi_slave_engine
   import spi_pkg::*; #(
@@ -80,6 +80,9 @@ module spi_slave_engine
   logic [5:0]            dfs_frame;     // DFS frozen on the first edge of a frame
   logic                  rx_active_x;   // 0 until the first sample edge of a frame
   logic                  tx_loaded_x;   // 0 until the first drive edge of a frame
+  logic                  tx_pend_x;     // a new word was loaded on the last drive edge
+  logic                  tx_pend_data_x; // ...and it came from tx_hold, not the idle value
+  logic                  tx_take_tgl_x; // toggles when a staged TX word has really been sent
   logic                  frame_tgl_x;   // toggles on each completed word
   logic [DATA_WIDTH-1:0] hold_x;        // completed word, held stable
   logic                  underrun_tgl_x;
@@ -130,27 +133,53 @@ module spi_slave_engine
     end
   end
 
-  // ---- transmit: drive on the opposite edge ----
+    // ---- transmit: drive on the opposite edge ----
   // Before the first drive edge MISO shows the first bit straight from tx_word.
-  // The first drive edge loads the shift register (CPHA=0: already advanced
-  // one bit; CPHA=1: not advanced, that edge only presents the first bit).
+  // A new word is loaded (bit 0 presented, not advanced) on the drive edge
+  // right after the sample edge that completed the previous word, and on the
+  // first drive edge of a frame for CPHA=1. For CPHA=0 the first drive edge
+  // loads the first word already advanced by one bit.
+  logic tx_boundary_x;                  // previous sample edge completed a word
+  assign tx_boundary_x = tx_loaded_x && rx_active_x && (bitcnt_x == 6'd0);
+
+  logic [DATA_WIDTH-1:0] tx_shifted;    // tx_cur advanced by one bit
+  assign tx_shifted = cfg.lsbfirst ? {1'b1, tx_cur[DATA_WIDTH-1:1]}
+                                   : {tx_cur[DATA_WIDTH-2:0], 1'b1};
+
   always_ff @(negedge sclk_sample or posedge cs_inactive or negedge spi_rst_n) begin
-    if (!spi_rst_n)       {tx_loaded_x, tx_sr_x} <= '0;
-    else if (cs_inactive) {tx_loaded_x, tx_sr_x} <= '0;
+    if (!spi_rst_n)       {tx_loaded_x, tx_pend_x, tx_pend_data_x, tx_sr_x} <= '0;
+    else if (cs_inactive) {tx_loaded_x, tx_pend_x, tx_pend_data_x, tx_sr_x} <= '0;
     else begin
       tx_loaded_x <= 1'b1;
-      if (cfg.cpha && !tx_loaded_x)
-        tx_sr_x <= tx_word;                       // present bit 0, do not advance
-      else
-        tx_sr_x <= cfg.lsbfirst ? {1'b1, tx_cur[DATA_WIDTH-1:1]}
-                                : {tx_cur[DATA_WIDTH-2:0], 1'b1};
+      if (tx_boundary_x || (cfg.cpha && !tx_loaded_x)) begin
+        tx_sr_x        <= tx_word;              // present bit 0 of a new word
+        tx_pend_x      <= 1'b1;                 // sent once the master clocks it
+        tx_pend_data_x <= tx_hold_vld;
+      end else begin
+        tx_sr_x        <= tx_shifted;
+        tx_pend_x      <= 1'b0;
+      end
     end
   end
 
-  // underrun toggle: power-on reset only
+  // A word counts as SENT on the drive edge after it was presented: the master
+  // sampled its first bit in between. A word presented on the last drive edge
+  // of a frame is never clocked, so it stays staged for the next frame.
+  // CPHA=0 first word: its first bit is sampled before the first drive edge.
+  logic tx_sent_x, tx_sent_data_x;
+  assign tx_sent_x      = !cs_inactive && (tx_pend_x || (!cfg.cpha && !tx_loaded_x));
+  assign tx_sent_data_x = tx_pend_x ? tx_pend_data_x : tx_hold_vld;
+
+  // sent / underrun toggles: power-on reset only. Underrun = the master clocked
+  // a word while no TX data was staged - once per word, not once per bit.
   always_ff @(negedge sclk_sample or negedge spi_rst_n) begin
-    if (!spi_rst_n)                         underrun_tgl_x <= 1'b0;
-    else if (!cs_inactive && !tx_hold_vld)  underrun_tgl_x <= ~underrun_tgl_x;
+    if (!spi_rst_n) begin
+      tx_take_tgl_x  <= 1'b0;
+      underrun_tgl_x <= 1'b0;
+    end else if (tx_sent_x) begin
+      if (tx_sent_data_x) tx_take_tgl_x  <= ~tx_take_tgl_x;
+      else                underrun_tgl_x <= ~underrun_tgl_x;
+    end
   end
 
   /* verilator lint_on SYNCASYNCNET */
@@ -168,11 +197,11 @@ module spi_slave_engine
   // The toggle is generated in the external-SCLK domain above, so only the
   // destination half of the event synchronizer is needed here: 2-FF sync
   // plus a ONE-cycle edge detect. Not the 2-cycle output of spi_event_sync
-  // (Spec 5.2): word_rdy is the RX FIFO write enable and the TX handshake,
-  // and evt_done / evt_rx_overrun / evt_tx_underrun feed toggle-type event
-  // synchronizers. All of them act once per cycle, so a 2-cycle pulse wrote
-  // every word twice and toggled every event twice (the second toggle
-  // cancels the first, so a slow pclk could miss the event).
+   // (Spec 5.2): word_rdy is the RX FIFO write enable, tx_take clears the TX
+  // staging register, and evt_done / evt_rx_overrun / evt_tx_underrun feed
+  // toggle-type event synchronizers. All of them act once per cycle, so a
+  // 2-cycle pulse would write every word twice and toggle every event twice
+  // (the second toggle cancels the first, so a slow pclk could miss it).
   logic word_rdy;
   (* ASYNC_REG = "TRUE" *) logic fq1, fq2;
   logic fqd1;
@@ -190,6 +219,19 @@ module spi_slave_engine
     else            {uqd1, uq2, uq1} <= {uq2, uq1, underrun_tgl_x};
   end
   assign evt_tx_underrun = uq2 ^ uqd1;
+
+  // "staged TX word was sent" event, synchronized the same way. Back-to-back
+  // words need the next word staged before the next word boundary:
+  // (DFS-1) SCLK periods > 4 spi_clk periods (DFS 4, spi_clk 29 MHz: SCLK
+  // up to ~21 MHz; DFS 8: beyond 50 MHz).
+  (* ASYNC_REG = "TRUE" *) logic tq1, tq2;
+  logic tqd1;
+  always_ff @(posedge spi_clk or negedge spi_rst_n) begin
+    if (!spi_rst_n) {tqd1, tq2, tq1} <= 3'b000;
+    else            {tqd1, tq2, tq1} <= {tq2, tq1, tx_take_tgl_x};
+  end
+  logic tx_take;
+  assign tx_take = tq2 ^ tqd1;
 
   // chip-select and partial-word status, synchronized for framing errors
   logic cs_n_sync, cs_n_sync_q, partial_sync;
@@ -226,8 +268,8 @@ module spi_slave_engine
       if (!tx_hold_vld && !tx_empty) begin
         tx_hold     <= tx_data;
         tx_hold_vld <= 1'b1;
-      end else if (tx_hold_vld && word_rdy) begin
-        // the frame just consumed the staged word; stage the next one
+        end else if (tx_hold_vld && tx_take) begin
+        // the staged word has really gone out on MISO; stage the next one
         tx_hold_vld <= 1'b0;
       end
     end
