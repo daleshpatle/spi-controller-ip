@@ -99,8 +99,17 @@ module spi_slave_engine
                  ? (cfg.lsbfirst ? tx_hold : (tx_hold << (DATA_WIDTH - 32'(cfg.dfs))))
                  : {DATA_WIDTH{1'b1}};  // idle value on underrun
 
+    // CPHA=0: the master samples the first bit on the first sample edge, straight
+  // from tx_word. first_data_x records whether that bit came from staged data or
+  // from the idle value, so the first drive edge shifts the SAME word and counts it
+  // the same way even if tx_hold is loaded in between (TX FIFO written mid-frame).
+  logic                  first_data_x;
+  logic [DATA_WIDTH-1:0] tx_first;      // CPHA=0: the word whose first bit is already out
+  assign tx_first = first_data_x ? tx_word : {DATA_WIDTH{1'b1}};
+
   logic [DATA_WIDTH-1:0] tx_cur;        // what MISO is shifting out right now
-  assign tx_cur = tx_loaded_x ? tx_sr_x : tx_word;
+  assign tx_cur = tx_loaded_x ? tx_sr_x
+                : (rx_active_x ? tx_first : tx_word);
 
   // Per-frame state: async reset on power-on OR CS_n high, constant 0 only.
   // The two toggles: power-on reset only (a CS_n reset would look like an event).
@@ -118,6 +127,23 @@ module spi_slave_engine
                                : {rx_sr_x[DATA_WIDTH-2:0], mosi_i};
       bitcnt_x <= last_bit_x ? 6'd0 : bitcnt_x + 6'd1;
     end
+  end
+
+  // CPHA=0 first word: data or idle, as seen by the master on the first sample edge
+  always_ff @(posedge sclk_sample or posedge cs_inactive or negedge spi_rst_n) begin
+    if (!spi_rst_n)        first_data_x <= 1'b0;
+    else if (cs_inactive)  first_data_x <= 1'b0;
+    else if (!rx_active_x) first_data_x <= tx_hold_vld;
+  end
+
+  // Word in progress, for FRAME_ERR: set by a sample edge that does not finish a
+  // word, cleared by one that does. Power-on reset ONLY - if CS_n cleared it, it
+  // would fall at the same moment CS_n rises, and the two equal-length 2-FF
+  // synchronizers would deliver both changes in the same spi_clk cycle.
+  logic word_open_x;
+  always_ff @(posedge sclk_sample or negedge spi_rst_n) begin
+    if (!spi_rst_n)        word_open_x <= 1'b0;
+    else if (!cs_inactive) word_open_x <= !last_bit_x;
   end
 
   // completed word and its toggle: power-on reset only
@@ -168,7 +194,7 @@ module spi_slave_engine
   // CPHA=0 first word: its first bit is sampled before the first drive edge.
   logic tx_sent_x, tx_sent_data_x;
   assign tx_sent_x      = !cs_inactive && (tx_pend_x || (!cfg.cpha && !tx_loaded_x));
-  assign tx_sent_data_x = tx_pend_x ? tx_pend_data_x : tx_hold_vld;
+    assign tx_sent_data_x = tx_pend_x ? tx_pend_data_x : first_data_x;
 
   // sent / underrun toggles: power-on reset only. Underrun = the master clocked
   // a word while no TX data was staged - once per word, not once per bit.
@@ -189,7 +215,7 @@ module spi_slave_engine
 
   // partial word present - used to flag a framing error at CS deassertion
   logic partial_x;
-  assign partial_x = (bitcnt_x != 6'd0);
+    assign partial_x = word_open_x;       // not cleared by CS_n (see word_open_x)
 
   // ------------------------------------------------------------------
   // Handoff into the spi_ref_clk domain
@@ -248,7 +274,14 @@ module spi_slave_engine
   // FRAME_ERR: chip-select deasserted with a partial word in the shift
   // register. The partial word is discarded - storing it would misalign
   // every subsequent word in the stream (Spec 7.2).
-  assign evt_frame_err = (cs_n_sync && !cs_n_sync_q) && partial_sync && !swrst_active;
+   // Evaluated one spi_clk cycle after the CS_n rise is seen: word_open_x last
+  // changed BEFORE CS_n rose, so by then partial_sync has settled.
+  logic cs_rise_q;
+  always_ff @(posedge spi_clk or negedge spi_rst_n) begin
+    if (!spi_rst_n) cs_rise_q <= 1'b0;
+    else            cs_rise_q <= cs_n_sync && !cs_n_sync_q;
+  end
+  assign evt_frame_err = cs_rise_q && partial_sync && !swrst_active;
 
   // ---- push the completed word into the RX FIFO ----
   assign rx_data        = hold_x;

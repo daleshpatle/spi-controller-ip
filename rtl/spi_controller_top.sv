@@ -194,9 +194,11 @@ module spi_controller_top
   assign rx_wen    = slave_mode ? s_rx_wen  : m_rx_wen;
   assign rx_wdata  = slave_mode ? s_rx_data : m_rx_data;
 
-  // The transfer FSM is the master FSM; in slave mode it stays in IDLE so
-  // the configuration latch is free to capture between frames.
-  assign fsm_idle  = slave_mode ? 1'b1 : m_idle;
+   // Master mode: idle = transfer FSM in IDLE. Slave mode: idle = not selected
+  // (synchronized CS_n high), so CPOL/CPHA/LSBFIRST/DFS can only change between
+  // frames; a CTRL write during a frame stays pending until CS_n rises.
+  // SWRST also opens the latch, so software can recover if CS_n never rises.
+  assign fsm_idle  = slave_mode ? (~s_busy | swrst_active) : m_idle;
 
   logic busy_spi, stall_spi;
   assign busy_spi  = slave_mode ? s_busy : m_busy;
