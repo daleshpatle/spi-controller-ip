@@ -18,11 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Verilator
+      - name: Install Verilator and Icarus Verilog
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq verilator
+          sudo apt-get install -y -qq verilator iverilog
           verilator --version
+          iverilog -V 2>&1 | sed -n 1p
 
       - name: Lint
         run: make lint
@@ -40,6 +41,19 @@ jobs:
           make modes 2>&1 | tee modes.log
           grep -q "ALL MODES PASS" modes.log
 
+      - name: Slave-mode regression (Verilator)
+        run: |
+          set -o pipefail
+          make slave 2>&1 | tee slave.log
+          grep -q "ALL SLAVE CASES PASS" slave.log
+
+      # 4-state run: a flop with no reset stays X here (Verilator would hide it)
+      - name: Slave-mode regression (Icarus, 4-state)
+        run: |
+          set -o pipefail
+          make slave-ivl 2>&1 | tee slave_ivl.log
+          grep -q "ALL SLAVE CASES PASS" slave_ivl.log
+
       - name: Upload simulation logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -48,4 +62,6 @@ jobs:
           path: |
             smoke.log
             modes.log
+            slave.log
+            slave_ivl.log
           if-no-files-found: ignore

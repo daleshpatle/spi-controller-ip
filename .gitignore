@@ -4,6 +4,8 @@ obj_*/
 *.fst.hier
 smoke.log
 modes.log
+slave.log
+slave_ivl.log
 xcelium.d/
 INCA_libs/
 xrun.log

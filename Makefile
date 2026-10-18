@@ -3,12 +3,17 @@
 #
 #   make            # build + run the smoke test
 #   make modes      # build + run the CPOL/CPHA/bit-order/DFS sweep
+#   make slave      # build + run the slave-mode regression (TB = SPI master)
+#   make slave-ivl  # same slave regression on Icarus Verilog (4-state)
 #   make lint       # lint only, no build
 #   make wave       # run the smoke test with VCD dump -> tb_spi_controller.vcd
 #   make wave-modes # same for the mode sweep
+#   make wave-slave # same for the slave regression
 #   make clean
 #=====================================================================
 VERILATOR ?= verilator
+IVERILOG  ?= iverilog
+VVP       ?= vvp
 
 # --binary  : elaborate, generate main(), compile and link in one step
 # --timing  : enable #delay / event control in initial blocks (Verilator 5.x)
@@ -20,7 +25,7 @@ VFLAGS += -Wno-DECLFILENAME            # spi_cdc_prims.sv holds 3 modules
 VFLAGS += -Wno-UNUSEDSIGNAL            # unused status/level bits
 VFLAGS += -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND
 
-.PHONY: all smoke modes lint wave wave-modes clean
+.PHONY: all smoke modes slave slave-ivl lint wave wave-modes wave-slave clean
 
 all: smoke
 
@@ -33,6 +38,18 @@ modes:
 	$(VERILATOR) $(VFLAGS) --top-module tb_modes \
 	    -f compile_modes.f -o sim_modes --Mdir obj_modes
 	./obj_modes/sim_modes
+
+slave:
+	$(VERILATOR) $(VFLAGS) --top-module tb_slave \
+	    -f compile_slave.f -o sim_slave --Mdir obj_slave
+	./obj_slave/sim_slave
+
+# Icarus is 4-state: a flop that is never reset stays X and the checks
+# fail. Verilator starts every flop at 0, which hides a missing reset.
+slave-ivl:
+	mkdir -p obj_ivl
+	$(IVERILOG) -g2012 -s tb_slave -o obj_ivl/sim_slave -c compile_slave.f
+	$(VVP) -n obj_ivl/sim_slave
 
 lint:
 	$(VERILATOR) --lint-only --timing --timescale 1ns/1ps -Wall -Wno-fatal \
@@ -51,6 +68,12 @@ wave-modes:
 	./obj_wmodes/sim_wmodes
 	@echo "  -> tb_modes.vcd"
 
+wave-slave:
+	$(VERILATOR) $(VFLAGS) --trace -DDUMP --top-module tb_slave \
+	    -f compile_slave.f -o sim_wslave --Mdir obj_wslave
+	./obj_wslave/sim_wslave
+	@echo "  -> tb_slave.vcd"
+
 clean:
-	rm -rf obj_smoke obj_modes obj_wave obj_wmodes *.vcd
+	rm -rf obj_smoke obj_modes obj_slave obj_ivl obj_wave obj_wmodes obj_wslave *.vcd
 
