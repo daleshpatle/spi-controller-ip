@@ -31,7 +31,11 @@ module spi_slave_engine
   input  logic                   spi_clk,
   input  logic                   spi_rst_n,
 
+    // Slave uses only dfs, lsbfirst, cpha and cpol; the other fields are
+  // master-only or handled in the top level
+  /* verilator lint_off UNUSEDSIGNAL */
   input  cfg_t                   cfg,
+  /* verilator lint_on UNUSEDSIGNAL */
   input  logic                   swrst_active,
 
   // external serial pins (slave direction)

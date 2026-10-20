@@ -72,18 +72,27 @@ module spi_controller_top
 
   // ---------------- interconnect ----------------
   cfg_t  cfg_bus, cfg_active;
-  logic  cfg_commit, cfg_valid_sync, cfg_capture, en_effective;
+  logic  cfg_commit, cfg_valid_sync, en_effective;  // line 75: cfg_capture removed
   logic  swrst_write, rst_busy, bus_clr, spi_clr, swrst_active;
 
   logic                  tx_wen, tx_full, tx_ren, tx_empty;
   logic [DATA_WIDTH-1:0] tx_wdata, tx_rdata;
-  logic [LW:0]           tx_level_bus, tx_level_spi;
+   logic [LW:0]           tx_level_bus;                  // line 80: tx_level_spi removed
 
   logic                  rx_wen, rx_full, rx_ren, rx_empty;
   logic [DATA_WIDTH-1:0] rx_wdata, rx_rdata;
-  logic [LW:0]           rx_level_spi, rx_level_bus;
+  logic [LW:0]           rx_level_bus;                  // line 84: rx_level_spi removed
 
   logic tx_flush, rx_flush;
+
+  // Sub-block outputs the top does not need (kept on purpose):
+  //   cfg_capture   capture strobe from the config latch (debug only)
+  //   tx_level_spi  TX FIFO level, SPI side: engines check tx_empty only
+  //   rx_level_spi  RX FIFO level, SPI side: engines check rx_full only
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic                  cfg_capture;
+  logic [LW:0]           tx_level_spi, rx_level_spi;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic fsm_idle;
 
   // ---------------- register file (bus domain) ----------------

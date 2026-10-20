@@ -18,7 +18,10 @@ module spi_master_engine
   input  logic                    spi_clk,
   input  logic                    spi_rst_n,
 
+   // cfg.mode and cfg.en are not used here: the top level handles them
+  /* verilator lint_off UNUSEDSIGNAL */
   input  cfg_t                    cfg,            // latched configuration
+  /* verilator lint_on UNUSEDSIGNAL */
   input  logic                    en_effective,   // post-capture EN (Spec 7.4)
   input  logic                    swrst_active,   // force to IDLE
 
@@ -82,7 +85,12 @@ module spi_master_engine
   logic                  tx_started;
 
   // ---------------- serial clock ----------------
-  logic lead_edge, trail_edge, drive_en, sample_en, edge_tick;
+    logic drive_en, sample_en, edge_tick;
+  // lead/trail strobes from the clock generator: the FSM uses only
+  // drive_en, sample_en and edge_tick
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic lead_edge, trail_edge;
+  /* verilator lint_on UNUSEDSIGNAL */
 
   assign run_clk = (state == S_TRANSFER);
 

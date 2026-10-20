@@ -52,10 +52,9 @@ slave-ivl:
 	$(VVP) -n obj_ivl/sim_slave
 
 lint:
-	$(VERILATOR) --lint-only --timing --timescale 1ns/1ps -Wall -Wno-fatal \
-	    -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL \
-	    --top-module tb_spi_controller -f compile.f
-
+	$(VERILATOR) --lint-only -Wall \
+	    -Wno-DECLFILENAME \
+	    --top-module spi_controller_top -f rtl.f
 wave:
 	$(VERILATOR) $(VFLAGS) --trace -DDUMP --top-module tb_spi_controller \
 	    -f compile.f -o sim_wave --Mdir obj_wave
