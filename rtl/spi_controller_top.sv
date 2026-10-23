@@ -8,8 +8,10 @@
 // inside spi_slave_engine.
 //
 // Multi-bit data crosses ONLY through the async FIFOs. Single-bit control
-// and status cross as event-synchronized pulses. The wide configuration
-// bus is captured, never continuously sampled.
+// and status cross as event-synchronized pulses (with acknowledge, so no
+// event is lost at any clock ratio). The wide configuration bus is
+// captured, never continuously sampled. EN crosses on its own two-flop
+// synchronizer and is not part of the latched configuration (Spec 7.4).
 //
 // INTEGRATION: presetn and spi_rst_n must be asserted TOGETHER. They are
 // separated only so each can be released synchronously to its own clock;
@@ -63,6 +65,15 @@ module spi_controller_top
 
   localparam int LW = $clog2(FIFO_DEPTH);
 
+  // ---------------- build-time parameter check (Spec 3.1) ----------------
+  // CS_SEL is two bits wide, so NUM_CS is limited to 1..4. The generate
+  // $fatal stops elaboration in tools that support elaboration system
+  // tasks; the initial $fatal stops a simulator that skips them at time 0.
+  if (NUM_CS < 1 || NUM_CS > 4) begin : g_num_cs_check
+    $fatal(1, "spi_controller_top: NUM_CS = %0d, legal range is 1 to 4", NUM_CS);
+    initial $fatal(1, "spi_controller_top: NUM_CS = %0d, legal range is 1 to 4", NUM_CS);
+  end
+
   // ---------------- per-domain reset synchronizers (Spec 7.7) ----------
   // Two independent instances. Never one instance fanning to both domains.
   logic prst_n_s, spi_rst_n_s;
@@ -72,16 +83,17 @@ module spi_controller_top
 
   // ---------------- interconnect ----------------
   cfg_t  cfg_bus, cfg_active;
-  logic  cfg_commit, cfg_valid_sync, en_effective;  // line 75: cfg_capture removed
+  logic  cfg_commit, cfg_valid_sync, cfg_sync_busy;
+  logic  en_bus, en_spi;
   logic  swrst_write, rst_busy, bus_clr, spi_clr, swrst_active;
 
   logic                  tx_wen, tx_full, tx_ren, tx_empty;
   logic [DATA_WIDTH-1:0] tx_wdata, tx_rdata;
-   logic [LW:0]           tx_level_bus;                  // line 80: tx_level_spi removed
+  logic [LW:0]           tx_level_bus;
 
   logic                  rx_wen, rx_full, rx_ren, rx_empty;
   logic [DATA_WIDTH-1:0] rx_wdata, rx_rdata;
-  logic [LW:0]           rx_level_bus;                  // line 84: rx_level_spi removed
+  logic [LW:0]           rx_level_bus;
 
   logic tx_flush, rx_flush;
 
@@ -106,7 +118,8 @@ module spi_controller_top
     .pclk(pclk), .prst_n(prst_n_s),
     .psel(psel), .penable(penable), .pwrite(pwrite), .paddr(paddr),
     .pwdata(pwdata), .prdata(prdata), .pready(pready), .pslverr(pslverr),
-    .cfg_bus(cfg_bus), .cfg_commit(cfg_commit), .swrst_write(swrst_write),
+    .cfg_bus(cfg_bus), .cfg_commit(cfg_commit), .cfg_sync_busy(cfg_sync_busy),
+    .en_bus(en_bus), .swrst_write(swrst_write),
     .tx_wen(tx_wen), .tx_wdata(tx_wdata), .tx_full(tx_full), .tx_level(tx_level_bus),
     .rx_ren(rx_ren), .rx_rdata(rx_rdata), .rx_empty(rx_empty), .rx_level(rx_level_bus),
     .tx_flush(tx_flush), .rx_flush(rx_flush),
@@ -119,14 +132,21 @@ module spi_controller_top
   // ---------------- configuration commit: bus -> SPI ----------------
   spi_event_sync u_cfg_sync (
     .src_clk(pclk),        .src_rst_n(prst_n_s),    .src_pulse(cfg_commit),
+    .src_busy(cfg_sync_busy),
     .dst_clk(spi_ref_clk), .dst_rst_n(spi_rst_n_s), .dst_pulse(cfg_valid_sync)
   );
 
   spi_cfg_latch #(.DEF_CPOL(DEF_CPOL), .DEF_CPHA(DEF_CPHA)) u_cfg_latch (
     .spi_clk(spi_ref_clk), .spi_rst_n(spi_rst_n_s),
     .cfg_bus(cfg_bus), .cfg_valid_sync(cfg_valid_sync), .fsm_idle(fsm_idle),
-    .cfg_active(cfg_active), .cfg_capture(cfg_capture), .en_effective(en_effective)
+    .cfg_active(cfg_active), .cfg_capture(cfg_capture)
   );
+
+  // ---------------- core enable: bus -> SPI (Spec 7.4) ----------------
+  // Own two-flop path, not the configuration latch, so EN = 0 is seen
+  // even while a transfer is in progress. en_bus rises only after the
+  // commit of the same write has been delivered (see spi_regfile).
+  spi_lvl_sync u_en_sync (.clk(spi_ref_clk), .rst_n(spi_rst_n_s), .d(en_bus), .q(en_spi));
 
   // ---------------- software reset sequencer ----------------
   spi_swrst_ctrl u_swrst (
@@ -139,12 +159,19 @@ module spi_controller_top
   // FIFO flush requests must clear BOTH sides. The bus side clears
   // immediately; the far side is cleared through an event synchronizer.
   logic tx_flush_spi, rx_flush_spi;
+  // src_busy of the flush synchronizers is not needed: a flush requested
+  // while one is in flight is merged into it, never lost
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic txflush_busy, rxflush_busy;
+  /* verilator lint_on UNUSEDSIGNAL */
   spi_event_sync u_txflush_sync (
     .src_clk(pclk),        .src_rst_n(prst_n_s),    .src_pulse(tx_flush),
+    .src_busy(txflush_busy),
     .dst_clk(spi_ref_clk), .dst_rst_n(spi_rst_n_s), .dst_pulse(tx_flush_spi)
   );
   spi_event_sync u_rxflush_sync (
     .src_clk(pclk),        .src_rst_n(prst_n_s),    .src_pulse(rx_flush),
+    .src_busy(rxflush_busy),
     .dst_clk(spi_ref_clk), .dst_rst_n(spi_rst_n_s), .dst_pulse(rx_flush_spi)
   );
 
@@ -167,15 +194,16 @@ module spi_controller_top
   logic                  m_tx_ren, m_rx_wen, m_busy, m_stall, m_idle;
   logic                  m_done, m_rxovf;
   logic [DATA_WIDTH-1:0] m_rx_data;
-  logic                  m_sclk, m_mosi;
+  logic                  m_sclk, m_mosi, m_oe;
   logic [NUM_CS-1:0]     m_cs_n;
 
   spi_master_engine #(.DATA_WIDTH(DATA_WIDTH), .NUM_CS(NUM_CS)) u_master (
     .spi_clk(spi_ref_clk), .spi_rst_n(spi_rst_n_s),
-    .cfg(cfg_active), .en_effective(en_effective), .swrst_active(swrst_active),
+    .cfg(cfg_active), .en(en_spi), .swrst_active(swrst_active),
     .tx_empty(tx_empty | cfg_active.mode), .tx_data(tx_rdata), .tx_ren(m_tx_ren),
     .rx_full(rx_full), .rx_wen(m_rx_wen), .rx_data(m_rx_data),
     .sclk_o(m_sclk), .mosi_o(m_mosi), .miso_i(miso_i), .cs_n_o(m_cs_n),
+    .pin_oe(m_oe),
     .busy(m_busy), .tx_stall(m_stall), .fsm_idle(m_idle),
     .evt_done(m_done), .evt_rx_overrun(m_rxovf)
   );
@@ -183,12 +211,13 @@ module spi_controller_top
   logic                  s_tx_ren, s_rx_wen, s_busy;
   logic                  s_done, s_rxovf, s_txunf, s_frerr;
   logic [DATA_WIDTH-1:0] s_rx_data;
-  logic                  s_miso;
+  logic                  s_miso, s_miso_oe;
 
   spi_slave_engine #(.DATA_WIDTH(DATA_WIDTH)) u_slave (
     .spi_clk(spi_ref_clk), .spi_rst_n(spi_rst_n_s),
-    .cfg(cfg_active), .swrst_active(swrst_active),
-    .sclk_i(sclk_i), .mosi_i(mosi_i), .miso_o(s_miso), .cs_n_i(cs_n_i),
+    .cfg(cfg_active), .en(en_spi), .swrst_active(swrst_active),
+    .sclk_i(sclk_i), .mosi_i(mosi_i), .miso_o(s_miso), .miso_oe(s_miso_oe),
+    .cs_n_i(cs_n_i),
     .tx_empty(tx_empty | ~cfg_active.mode), .tx_data(tx_rdata), .tx_ren(s_tx_ren),
     .rx_full(rx_full), .rx_wen(s_rx_wen), .rx_data(s_rx_data),
     .busy(s_busy), .evt_done(s_done), .evt_rx_overrun(s_rxovf),
@@ -203,7 +232,7 @@ module spi_controller_top
   assign rx_wen    = slave_mode ? s_rx_wen  : m_rx_wen;
   assign rx_wdata  = slave_mode ? s_rx_data : m_rx_data;
 
-   // Master mode: idle = transfer FSM in IDLE. Slave mode: idle = not selected
+  // Master mode: idle = transfer FSM in IDLE. Slave mode: idle = not selected
   // (synchronized CS_n high), so CPOL/CPHA/LSBFIRST/DFS can only change between
   // frames; a CTRL write during a frame stays pending until CS_n rises.
   // SWRST also opens the latch, so software can recover if CS_n never rises.
@@ -213,16 +242,19 @@ module spi_controller_top
   assign busy_spi  = slave_mode ? s_busy : m_busy;
   assign stall_spi = slave_mode ? 1'b0   : m_stall;
 
-  // ---------------- pin direction ----------------
+  // ---------------- pin direction (Spec 4.3) ----------------
   assign sclk_o  = m_sclk;
   assign mosi_o  = m_mosi;
   assign miso_o  = s_miso;
   assign cs_n_o  = m_cs_n;
-  // LOOPBACK holds the external pins idle (Spec 7.5)
-  assign sclk_oe = ~slave_mode & ~cfg_active.loopback;
-  assign mosi_oe = ~slave_mode & ~cfg_active.loopback;
-  assign cs_oe   = ~slave_mode & ~cfg_active.loopback;
-  assign miso_oe =  slave_mode & ~cs_n_i;      // released to Hi-Z when not selected
+  // Master outputs: master mode, LOOPBACK = 0 and EN = 1, held after EN
+  // is cleared until chip-select is high and the FSM is idle (u_master).
+  // No SPI pin is driven after reset, with EN = 0 or in loopback.
+  assign sclk_oe = m_oe;
+  assign mosi_oe = m_oe;
+  assign cs_oe   = m_oe;
+  // MISO: slave mode, enabled at the last frame boundary, and selected
+  assign miso_oe = s_miso_oe;
 
   // ---------------- status: SPI -> bus (level synchronizers) ----------
   spi_lvl_sync u_busy_sync  (.clk(pclk), .rst_n(prst_n_s), .d(busy_spi),  .q(busy_sync));
@@ -233,20 +265,28 @@ module spi_controller_top
   assign evt_done_spi  = slave_mode ? s_done  : m_done;
   assign evt_rxovf_spi = slave_mode ? s_rxovf : m_rxovf;
 
+  // src_busy of these four is not needed: the consumers are sticky bits
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic done_busy, rxovf_busy, txunf_busy, frerr_busy;
+  /* verilator lint_on UNUSEDSIGNAL */
   spi_event_sync u_done_sync (
     .src_clk(spi_ref_clk), .src_rst_n(spi_rst_n_s), .src_pulse(evt_done_spi),
+    .src_busy(done_busy),
     .dst_clk(pclk),        .dst_rst_n(prst_n_s),    .dst_pulse(evt_done_bus)
   );
   spi_event_sync u_rxovf_sync (
     .src_clk(spi_ref_clk), .src_rst_n(spi_rst_n_s), .src_pulse(evt_rxovf_spi),
+    .src_busy(rxovf_busy),
     .dst_clk(pclk),        .dst_rst_n(prst_n_s),    .dst_pulse(evt_rxovf_bus)
   );
   spi_event_sync u_txunf_sync (
     .src_clk(spi_ref_clk), .src_rst_n(spi_rst_n_s), .src_pulse(s_txunf & slave_mode),
+    .src_busy(txunf_busy),
     .dst_clk(pclk),        .dst_rst_n(prst_n_s),    .dst_pulse(evt_txunf_bus)
   );
   spi_event_sync u_frerr_sync (
     .src_clk(spi_ref_clk), .src_rst_n(spi_rst_n_s), .src_pulse(s_frerr & slave_mode),
+    .src_busy(frerr_busy),
     .dst_clk(pclk),        .dst_rst_n(prst_n_s),    .dst_pulse(evt_frerr_bus)
   );
 

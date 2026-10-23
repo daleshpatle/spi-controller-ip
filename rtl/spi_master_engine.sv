@@ -3,8 +3,17 @@
 //
 // States (Spec 7.1 / FSM diagram):
 //   IDLE -> LOAD -> CS_SETUP -> TRANSFER -> CS_HOLD -> DONE -> IDLE
-//   TRANSFER -> STALL  (TX FIFO empty at a word boundary, CS held)
+//   TRANSFER -> LOAD -> TRANSFER  (next queued word, chip-select held:
+//                                  CS_SETUP only once per assertion)
+//   TRANSFER -> STALL  (CS_AUTO=0 and TX FIFO empty at a word boundary)
 //   any state -> IDLE  (software reset)
+//
+// EN (Spec 7.4) arrives on its own synchronizer, not through the
+// configuration latch. EN = 0 lets the word in progress finish, loads no
+// further word, deasserts chip-select after CS_HOLD with either CS_AUTO
+// setting (a STALL ends the same way) and returns to IDLE. The pad output
+// enable is held until then, so the outputs are released only once
+// chip-select is high and the FSM is idle.
 //
 // Frame termination counts SCLK EDGES, not sample strobes: a frame ends
 // after exactly 2*DFS edges, which guarantees SCLK is back at its CPOL
@@ -18,11 +27,8 @@ module spi_master_engine
   input  logic                    spi_clk,
   input  logic                    spi_rst_n,
 
-   // cfg.mode and cfg.en are not used here: the top level handles them
-  /* verilator lint_off UNUSEDSIGNAL */
   input  cfg_t                    cfg,            // latched configuration
-  /* verilator lint_on UNUSEDSIGNAL */
-  input  logic                    en_effective,   // post-capture EN (Spec 7.4)
+  input  logic                    en,             // SPI_CTRL.EN, synchronized (Spec 7.4)
   input  logic                    swrst_active,   // force to IDLE
 
   // TX FIFO read port (SPI side)
@@ -40,6 +46,7 @@ module spi_master_engine
   output logic                    mosi_o,
   input  logic                    miso_i,
   output logic [NUM_CS-1:0]       cs_n_o,
+  output logic                    pin_oe,         // sclk_oe / mosi_oe / cs_oe (Spec 4.3)
 
   // status / events
   output logic                    busy,
@@ -54,11 +61,12 @@ module spi_master_engine
   // Configuration fields unpacked into plain nets. Packed-struct member
   // selects inside always blocks are poorly supported by some tools, and
   // flat nets also make the synthesised logic easier to read.
-  logic       c_cpol, c_cpha, c_lsbfirst, c_loopback, c_cs_auto;
+  logic       c_mode, c_cpol, c_cpha, c_lsbfirst, c_loopback, c_cs_auto;
   logic [5:0] c_dfs, c_cs_setup, c_cs_hold;
   logic [7:0] c_clkdiv;
   logic [1:0] c_cs_sel;
 
+  assign c_mode     = cfg.mode;
   assign c_cpol     = cfg.cpol;
   assign c_cpha     = cfg.cpha;
   assign c_lsbfirst = cfg.lsbfirst;
@@ -85,7 +93,7 @@ module spi_master_engine
   logic                  tx_started;
 
   // ---------------- serial clock ----------------
-    logic drive_en, sample_en, edge_tick;
+  logic drive_en, sample_en, edge_tick;
   // lead/trail strobes from the clock generator: the FSM uses only
   // drive_en, sample_en and edge_tick
   /* verilator lint_off UNUSEDSIGNAL */
@@ -137,22 +145,27 @@ module spi_master_engine
   logic more_data;
   assign more_data = !tx_empty;
 
+  // EN = 0 is checked only at word boundaries (end of TRANSFER, and in
+  // STALL): the word in progress always completes, and no further word is
+  // loaded even if the TX FIFO holds data (Spec 7.4).
   always_comb begin
     nstate = state;
     unique case (state)
-      S_IDLE:     if (en_effective && !tx_empty)          nstate = S_LOAD;
-      S_LOAD:                                             nstate = S_CS_SETUP;
-      S_CS_SETUP: if (!c_cs_auto || cs_cnt >= {1'b0, c_cs_setup})
-                                                          nstate = S_TRANSFER;
+      S_IDLE:     if (en && !tx_empty)                    nstate = S_LOAD;
+      // chip-select still asserted from the previous word: no CS_SETUP
+      S_LOAD:     if (cs_active)                          nstate = S_TRANSFER;
+                  else                                    nstate = S_CS_SETUP;
+      S_CS_SETUP: if (cs_cnt >= {1'b0, c_cs_setup})       nstate = S_TRANSFER;
       S_TRANSFER: if (frame_last_edge) begin
-                    if (more_data)         nstate = S_LOAD;
+                    if (!en)               nstate = S_CS_HOLD;
+                    else if (more_data)    nstate = S_LOAD;
                     else if (c_cs_auto)    nstate = S_CS_HOLD;
                     else                   nstate = S_STALL;
                   end
-      S_STALL:    if (more_data)                          nstate = S_LOAD;
-                  else if (!en_effective)                 nstate = S_CS_HOLD;
-      S_CS_HOLD:  if (!c_cs_auto || cs_cnt >= {1'b0, c_cs_hold})
-                                                          nstate = S_DONE;
+      S_STALL:    if (!en)                                nstate = S_CS_HOLD;
+                  else if (more_data)                     nstate = S_LOAD;
+      // CS_HOLD applies with either CS_AUTO setting (Spec 6.7)
+      S_CS_HOLD:  if (cs_cnt >= {1'b0, c_cs_hold})        nstate = S_DONE;
       S_DONE:                                             nstate = S_IDLE;
       default:                                            nstate = S_IDLE;
     endcase
@@ -189,9 +202,9 @@ module spi_master_engine
 
       unique case (state)
         S_IDLE: begin
-          edge_cnt <= '0;
-          cs_cnt   <= '0;
-          if (c_cs_auto) cs_active <= 1'b0;
+          edge_cnt  <= '0;
+          cs_cnt    <= '0;
+          cs_active <= 1'b0;             // chip-select is never held in IDLE
         end
 
         S_LOAD: begin
@@ -240,8 +253,8 @@ module spi_master_engine
         end
 
         S_DONE: begin
-          if (c_cs_auto) cs_active <= 1'b0;
-          cs_cnt <= '0;
+          cs_active <= 1'b0;             // end of the chip-select frame, either CS_AUTO
+          cs_cnt    <= '0;
         end
 
         default: ;
@@ -262,6 +275,18 @@ module spi_master_engine
     for (int i = 0; i < NUM_CS; i++)
       cs_n_o[i] = !(cs_active && (32'(c_cs_sel) == i));
   end
+
+  // ---------------- pad output enable (Spec 4.3, 7.4) ----------------
+  // Driven in master mode with LOOPBACK = 0 while EN = 1, and after EN is
+  // cleared until the FSM is back in IDLE (chip-select already high).
+  // Registered, so the pad enables cannot glitch on a state change. Reset
+  // value 0: no SPI pin is driven during or after reset.
+  logic oe_q;
+  always_ff @(posedge spi_clk or negedge spi_rst_n) begin
+    if (!spi_rst_n) oe_q <= 1'b0;
+    else            oe_q <= !c_mode && !c_loopback && (en || (state != S_IDLE));
+  end
+  assign pin_oe = oe_q;
 
   // ---------------- status ----------------
   assign fsm_idle = (state == S_IDLE);

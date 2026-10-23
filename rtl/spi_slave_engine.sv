@@ -23,6 +23,14 @@
 // value that is constant for the whole frame. No multi-bit synchronizer
 // is required - and none would be correct, because it would introduce
 // bit skew across the DFS field.
+//
+// Enable (Spec 7.2, 7.4). EN is applied only at frame boundaries: slv_en
+// follows the synchronized EN only while chip-select is high and the
+// previous frame has been fully handed over. With slv_en = 0 the slave
+// ignores chip-select: miso_oe stays 0, no word is written to the RX FIFO,
+// no TX word is staged or used and no event is raised. The SCLK-domain
+// logic keeps running and is simply not listened to, so a frame is never
+// cut or joined part-way. BUSY still follows chip-select (Spec 6.3).
 //======================================================================
 module spi_slave_engine
   import spi_pkg::*; #(
@@ -31,17 +39,19 @@ module spi_slave_engine
   input  logic                   spi_clk,
   input  logic                   spi_rst_n,
 
-    // Slave uses only dfs, lsbfirst, cpha and cpol; the other fields are
-  // master-only or handled in the top level
+  // Slave uses only dfs, lsbfirst, cpha, cpol and mode; the other fields
+  // are master-only
   /* verilator lint_off UNUSEDSIGNAL */
   input  cfg_t                   cfg,
   /* verilator lint_on UNUSEDSIGNAL */
+  input  logic                   en,              // SPI_CTRL.EN, synchronized (Spec 7.4)
   input  logic                   swrst_active,
 
   // external serial pins (slave direction)
   input  logic                   sclk_i,
   input  logic                   mosi_i,
   output logic                   miso_o,
+  output logic                   miso_oe,         // pad output enable (Spec 4.3)
   input  logic                   cs_n_i,
 
   // TX FIFO read port (SPI side)
@@ -68,6 +78,7 @@ module spi_slave_engine
   // ------------------------------------------------------------------
   logic [DATA_WIDTH-1:0] tx_hold;
   logic                  tx_hold_vld;
+  logic                  slv_en;        // EN as applied at the last frame boundary
 
   // ------------------------------------------------------------------
   // External-SCLK domain
@@ -103,7 +114,7 @@ module spi_slave_engine
                  ? (cfg.lsbfirst ? tx_hold : (tx_hold << (DATA_WIDTH - 32'(cfg.dfs))))
                  : {DATA_WIDTH{1'b1}};  // idle value on underrun
 
-    // CPHA=0: the master samples the first bit on the first sample edge, straight
+  // CPHA=0: the master samples the first bit on the first sample edge, straight
   // from tx_word. first_data_x records whether that bit came from staged data or
   // from the idle value, so the first drive edge shifts the SAME word and counts it
   // the same way even if tx_hold is loaded in between (TX FIFO written mid-frame).
@@ -198,7 +209,7 @@ module spi_slave_engine
   // CPHA=0 first word: its first bit is sampled before the first drive edge.
   logic tx_sent_x, tx_sent_data_x;
   assign tx_sent_x      = !cs_inactive && (tx_pend_x || (!cfg.cpha && !tx_loaded_x));
-    assign tx_sent_data_x = tx_pend_x ? tx_pend_data_x : first_data_x;
+  assign tx_sent_data_x = tx_pend_x ? tx_pend_data_x : first_data_x;
 
   // sent / underrun toggles: power-on reset only. Underrun = the master clocked
   // a word while no TX data was staged - once per word, not once per bit.
@@ -219,7 +230,7 @@ module spi_slave_engine
 
   // partial word present - used to flag a framing error at CS deassertion
   logic partial_x;
-    assign partial_x = word_open_x;       // not cleared by CS_n (see word_open_x)
+  assign partial_x = word_open_x;       // not cleared by CS_n (see word_open_x)
 
   // ------------------------------------------------------------------
   // Handoff into the spi_ref_clk domain
@@ -248,7 +259,7 @@ module spi_slave_engine
     if (!spi_rst_n) {uqd1, uq2, uq1} <= 3'b000;
     else            {uqd1, uq2, uq1} <= {uq2, uq1, underrun_tgl_x};
   end
-  assign evt_tx_underrun = uq2 ^ uqd1;
+  assign evt_tx_underrun = (uq2 ^ uqd1) && slv_en;
 
   // "staged TX word was sent" event, synchronized the same way. Back-to-back
   // words need the next word staged before the next word boundary:
@@ -278,22 +289,37 @@ module spi_slave_engine
   // FRAME_ERR: chip-select deasserted with a partial word in the shift
   // register. The partial word is discarded - storing it would misalign
   // every subsequent word in the stream (Spec 7.2).
-   // Evaluated one spi_clk cycle after the CS_n rise is seen: word_open_x last
+  // Evaluated one spi_clk cycle after the CS_n rise is seen: word_open_x last
   // changed BEFORE CS_n rose, so by then partial_sync has settled.
   logic cs_rise_q;
   always_ff @(posedge spi_clk or negedge spi_rst_n) begin
     if (!spi_rst_n) cs_rise_q <= 1'b0;
     else            cs_rise_q <= cs_n_sync && !cs_n_sync_q;
   end
-  assign evt_frame_err = cs_rise_q && partial_sync && !swrst_active;
+
+  // ---- enable, applied at frame boundaries (Spec 7.2, 7.4) ----
+  // Updated only when the synchronized chip-select has been high for two
+  // cycles and the FRAME_ERR check (cs_rise_q) is over. Every handoff of
+  // the frame (last word, TX take, underrun) toggles before chip-select
+  // rises, so it has been seen by then and is judged with the enable that
+  // was in force during that frame. Reset 0: EN resets to 0.
+  always_ff @(posedge spi_clk or negedge spi_rst_n) begin
+    if (!spi_rst_n)                                  slv_en <= 1'b0;
+    else if (cs_n_sync && cs_n_sync_q && !cs_rise_q) slv_en <= en;
+  end
+
+  assign evt_frame_err = cs_rise_q && partial_sync && slv_en && !swrst_active;
 
   // ---- push the completed word into the RX FIFO ----
   assign rx_data        = hold_x;
-  assign rx_wen         = word_rdy && !rx_full && !swrst_active;
-  assign evt_rx_overrun = word_rdy &&  rx_full && !swrst_active;
-  assign evt_done       = word_rdy && !swrst_active;
+  assign rx_wen         = word_rdy && slv_en && !rx_full && !swrst_active;
+  assign evt_rx_overrun = word_rdy && slv_en &&  rx_full && !swrst_active;
+  assign evt_done       = word_rdy && slv_en && !swrst_active;
 
   // ---- keep the TX holding register fed ----
+  // Nothing is staged while the slave is off. A word staged before EN was
+  // cleared stays staged (it is shifted out unseen in an ignored frame, and
+  // its take is ignored), so it is sent in the next enabled frame.
   always_ff @(posedge spi_clk or negedge spi_rst_n) begin
     if (!spi_rst_n) begin
       tx_hold     <= '0;
@@ -301,18 +327,22 @@ module spi_slave_engine
     end else if (swrst_active) begin
       tx_hold     <= '0;
       tx_hold_vld <= 1'b0;
-    end else begin
+    end else if (slv_en) begin
       if (!tx_hold_vld && !tx_empty) begin
         tx_hold     <= tx_data;
         tx_hold_vld <= 1'b1;
-        end else if (tx_hold_vld && tx_take) begin
+      end else if (tx_hold_vld && tx_take) begin
         // the staged word has really gone out on MISO; stage the next one
         tx_hold_vld <= 1'b0;
       end
     end
   end
 
-  assign tx_ren = (!tx_hold_vld && !tx_empty && !swrst_active);
-  assign busy   = !cs_n_sync;
+  assign tx_ren  = (!tx_hold_vld && !tx_empty && slv_en && !swrst_active);
+  assign busy    = !cs_n_sync;           // chip-select asserted, enabled or not
+
+  // MISO is driven only in slave mode, while enabled and selected. cs_n_i
+  // is used directly so that MISO is released as soon as chip-select rises.
+  assign miso_oe = cfg.mode && slv_en && !cs_n_i;
 
 endmodule

@@ -19,6 +19,11 @@
 // The request is accepted unconditionally in any state: a software reset
 // must remain available when the core is hung, which is precisely when a
 // precondition such as EN=0 or BUSY=0 could not be met.
+//
+// A SWRST write that arrives while RST_BUSY is already set is merged into
+// the reset in progress. Sending it as a second request could start a
+// second sequence after the first one has already cleared RST_BUSY, so
+// software would see RST_BUSY = 0 while the datapath is still being reset.
 //======================================================================
 module spi_swrst_ctrl (
   // bus domain
@@ -37,7 +42,8 @@ module spi_swrst_ctrl (
 
   // ---------------- bus domain: request and RST_BUSY ----------------
   logic req_pulse;
-  assign req_pulse = swrst_write;      // accepted unconditionally
+  // accepted in any state; merged into a reset that is already running
+  assign req_pulse = swrst_write && !rst_busy;
 
   logic done_pulse_bus;
 
@@ -55,8 +61,14 @@ module spi_swrst_ctrl (
 
   // ---------------- request: bus -> SPI ----------------
   logic req_pulse_spi;
+  // src_busy is not needed: rst_busy already blocks a new request until
+  // this reset completes
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic req_busy;
+  /* verilator lint_on UNUSEDSIGNAL */
   spi_event_sync u_req_sync (
     .src_clk   (pclk),    .src_rst_n (prst_n),    .src_pulse (req_pulse),
+    .src_busy  (req_busy),
     .dst_clk   (spi_clk), .dst_rst_n (spi_rst_n), .dst_pulse (req_pulse_spi)
   );
 
@@ -107,8 +119,14 @@ module spi_swrst_ctrl (
   assign spi_clr      = (rstate == R_FLUSH);
 
   // ---------------- completion: SPI -> bus ----------------
+  // src_busy is not needed: one completion per request, and the next
+  // request waits for RST_BUSY to clear
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic done_busy;
+  /* verilator lint_on UNUSEDSIGNAL */
   spi_event_sync u_done_sync (
     .src_clk   (spi_clk), .src_rst_n (spi_rst_n), .src_pulse (done_pulse_spi),
+    .src_busy  (done_busy),
     .dst_clk   (pclk),    .dst_rst_n (prst_n),    .dst_pulse (done_pulse_bus)
   );
 

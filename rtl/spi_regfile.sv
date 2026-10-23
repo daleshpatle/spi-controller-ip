@@ -8,7 +8,11 @@
 // SPI_CTRL is always writable regardless of FSM state; configuration
 // writes update the register file immediately and reach the SPI domain
 // only at the next capture (Spec 5.4). The only PSLVERR raised on
-// SPI_CTRL is for an out-of-range DFS value (Spec 6.2).
+// SPI_CTRL is for an out-of-range DFS value (Spec 6.2); on SPI_FIFOCTRL
+// it is raised for an out-of-range watermark level (Spec 6.8).
+//
+// EN is not part of the latched bundle. It leaves this block as en_bus
+// and crosses on its own two-flop synchronizer (Spec 7.4).
 //======================================================================
 module spi_regfile
   import spi_pkg::*; #(
@@ -34,6 +38,8 @@ module spi_regfile
   // configuration out to the latch
   output cfg_t                        cfg_bus,
   output logic                        cfg_commit,     // 1-cycle commit pulse
+  input  logic                        cfg_sync_busy,  // commit still in flight
+  output logic                        en_bus,         // EN, to its own synchronizer
   output logic                        swrst_write,
 
   // TX FIFO write port (bus side)
@@ -118,6 +124,17 @@ module spi_regfile
   assign dfs_bad = is_ctrl && wr &&
                    ((dfs_wr < 6'd4) || (dfs_wr > 6'd32) || (32'(dfs_wr) > DATA_WIDTH));
 
+  // Watermark range check (Spec 6.8): TX_WM_LVL 0..FIFO_DEPTH,
+  // RX_WM_LVL 1..FIFO_DEPTH. An out-of-range write is rejected as a whole:
+  // no field changes and no flush is performed.
+  logic [7:0] tx_wm_wr, rx_wm_wr;
+  logic       wm_bad;
+  assign tx_wm_wr = pwdata[15:8];
+  assign rx_wm_wr = pwdata[23:16];
+  assign wm_bad   = is_fifoctrl && wr &&
+                    ((32'(tx_wm_wr) > FIFO_DEPTH) || (rx_wm_wr == 8'd0) ||
+                     (32'(rx_wm_wr) > FIFO_DEPTH));
+
   // ---------------- PSLVERR (Spec 7.6) ----------------
   // Each FIFO-port guard is qualified by its OWN address decode. This is
   // what keeps SPI_CTRL - and therefore SWRST - always writable even while
@@ -128,6 +145,7 @@ module spi_regfile
      || (wr && (is_stat || is_rxdata || is_fifolvl))           // write to RO
      || (rd &&  is_txdata)                                     // read of WO
      || dfs_bad                                                // out-of-range DFS
+     || wm_bad                                                 // out-of-range watermark
      || (wr && is_txdata && (tx_full  || rst_busy))            // TX FIFO guard
      || (rd && is_rxdata && (rx_empty || rst_busy))            // RX FIFO guard
   );
@@ -140,9 +158,12 @@ module spi_regfile
   assign rx_ren   = rd && is_rxdata && !rx_empty && !rst_busy;
 
   // ---------------- watermark and DMA ----------------
+  // Full-width compare (Spec 6.8). The level is LW+1 bits wide and reaches
+  // FIFO_DEPTH; the thresholds are range-checked on write, so a level of
+  // FIFO_DEPTH or a threshold of FIFO_DEPTH is never truncated (bug B12).
   logic tx_wm, rx_wm;
-  assign tx_wm = (tx_level <= {1'b0, r_tx_wm_lvl[LW-1:0]});   // space available
-  assign rx_wm = (rx_level >= {1'b0, r_rx_wm_lvl[LW-1:0]}) && (rx_level != '0);
+  assign tx_wm = (32'(tx_level) <= 32'(r_tx_wm_lvl));          // space available
+  assign rx_wm = (32'(rx_level) >= 32'(r_rx_wm_lvl)) && (rx_level != '0);
 
   assign tx_dreq = tx_wm && r_txdmaen;
   assign rx_dreq = rx_wm && r_rxdmaen;
@@ -190,9 +211,8 @@ module spi_regfile
         r_cs_hold  <= pwdata[14:9];
       end
       if (wr && is_fifoctrl && !pslverr) begin
-        r_tx_wm_lvl <= pwdata[15:8];
-        // RX_WM_LVL of 0 would assert permanently and is not permitted
-        r_rx_wm_lvl <= (pwdata[23:16] == 8'd0) ? 8'd1 : pwdata[23:16];
+        r_tx_wm_lvl <= tx_wm_wr;          // range already validated
+        r_rx_wm_lvl <= rx_wm_wr;          // 1..FIFO_DEPTH, 0 is rejected
       end
       if (wr && is_ie && !pslverr) r_ie <= pwdata[IRQ_N-1:0];
     end
@@ -216,6 +236,20 @@ module spi_regfile
     else         cfg_commit_q <= cfg_wr_hit;
   end
   assign cfg_commit = cfg_commit_q;
+
+  // ---------------- EN to the SPI domain (Spec 7.4) ----------------
+  // Clearing EN is passed on at once, so a transfer stops at the end of
+  // the word in progress. Setting EN is held back until the commit issued
+  // by the same write has been acknowledged by the SPI domain
+  // (cfg_commit_q covers the cycle before the event synchronizer turns
+  // busy). The first frame after enabling therefore always runs with the
+  // configuration written together with, or before, EN = 1, at any
+  // pclk : spi_ref_clk ratio. Once set, later commits do not affect it.
+  always_ff @(posedge pclk or negedge prst_n) begin
+    if (!prst_n)                                en_bus <= 1'b0;
+    else if (!r_en)                             en_bus <= 1'b0;
+    else if (!cfg_commit_q && !cfg_sync_busy)   en_bus <= 1'b1;
+  end
 
   // ---------------- interrupt status ----------------
   // SPI_IS latches every source independently of SPI_IE. SPI_IE gates only
@@ -275,7 +309,6 @@ module spi_regfile
 
   // ---------------- configuration bundle out ----------------
   always_comb begin
-    cfg_bus.en       = r_en;
     cfg_bus.mode     = r_mode;
     cfg_bus.cpol     = r_cpol;
     cfg_bus.cpha     = r_cpha;

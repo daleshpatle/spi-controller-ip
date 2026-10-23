@@ -27,8 +27,8 @@ package spi_pkg;
   // ------------------------------------------------------------------
   // Latched configuration bundle (Spec 5.3).
   // Captured in one shot into the SPI domain by the configuration latch.
-  // EN is part of this bundle; the IDLE->LOAD start condition is
-  // evaluated against the post-capture value (Spec 7.4).
+  // EN is NOT part of this bundle: it has its own two-flop synchronizer
+  // so that clearing it takes effect even during a transfer (Spec 7.4).
   // ------------------------------------------------------------------
   typedef struct packed {
     logic [5:0] cs_hold;    // SPI_CSCTRL[14:9]
@@ -42,7 +42,6 @@ package spi_pkg;
     logic       cpha;       // SPI_CTRL[3]
     logic       cpol;       // SPI_CTRL[2]
     logic       mode;       // SPI_CTRL[1]  0=master 1=slave
-    logic       en;         // SPI_CTRL[0]
   } cfg_t;
 
   // Reset value of the latched bundle (mirrors Spec 6.10)
@@ -60,7 +59,6 @@ package spi_pkg;
     c.cpha     = def_cpha;
     c.cpol     = def_cpol;
     c.mode     = 1'b0;
-    c.en       = 1'b0;
     return c;
   endfunction
 

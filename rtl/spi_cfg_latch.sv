@@ -14,9 +14,10 @@
 // until the FSM next reaches IDLE.  Latest-value-wins: cfg_bus is sampled
 // at capture time, so two writes while busy capture the second value.
 //
-// en_effective is the POST-CAPTURE enable. The FSM must evaluate
-// IDLE->LOAD against this, never against cfg_active.en alone, otherwise a
-// frame can launch on a stale EN in the very cycle the capture lands.
+// EN is not latched (Spec 5.3). It reaches the engines on its own two-flop
+// synchronizer, because the capture condition depends on the FSM being
+// idle: a latched EN could never stop a transfer, and the manual
+// chip-select STALL could only be left by SWRST (bug B11).
 //======================================================================
 module spi_cfg_latch
   import spi_pkg::*; #(
@@ -31,15 +32,13 @@ module spi_cfg_latch
   input  logic  fsm_idle,
 
   output cfg_t  cfg_active,
-  output logic  cfg_capture,      // high in the cycle the capture happens
-  output logic  en_effective      // post-capture EN, for the FSM start condition
+  output logic  cfg_capture       // high in the cycle the capture happens
 );
 
 
   logic cfg_pend;
 
   assign cfg_capture  = (cfg_valid_sync | cfg_pend) & fsm_idle;
-  assign en_effective = cfg_capture ? cfg_bus.en : cfg_active.en;
 
   always_ff @(posedge spi_clk or negedge spi_rst_n) begin
     if (!spi_rst_n) begin
