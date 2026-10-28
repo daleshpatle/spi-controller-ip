@@ -12,6 +12,7 @@
 #   make clean
 #=====================================================================
 VERILATOR ?= verilator
+YOSYS ?= $(HOME)/oss-cad-suite/bin/yosys
 IVERILOG  ?= iverilog
 VVP       ?= vvp
 
@@ -75,4 +76,14 @@ wave-slave:
 
 clean:
 	rm -rf obj_smoke obj_modes obj_slave obj_ivl obj_wave obj_wmodes obj_wslave *.vcd
+
+struct:
+		$(YOSYS) -q -p "read_slang -f rtl.f --top spi_controller_top \
+		    --blackboxed-module spi_slave_engine; proc; check -nolatches -assert"
+
+r3:
+		$(VERILATOR) $(VFLAGS) --top-module tb_r3 \
+	 	   -f compile_r3.f -o sim_r3 --Mdir obj_r3
+		./obj_r3/sim_r3
+
 
