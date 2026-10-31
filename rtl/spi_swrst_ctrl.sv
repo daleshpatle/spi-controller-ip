@@ -8,7 +8,8 @@
 //
 // Sequence:
 //   1. RST_BUSY <- 1; APB access to SPI_TXDATA/SPI_RXDATA -> PSLVERR
-//   2. bus-domain state cleared (FIFO pointer, its sync pipeline, SPI_IS)
+//   2. bus-domain state cleared (FIFO pointer, its sync pipeline, SPI_IS);
+//      the FIFO pointer stays cleared until RST_BUSY falls
 //   3. request crosses to the SPI domain through an event synchronizer
 //   4. SCLK stopped and parked at the CPOL idle level
 //   5. chip-select deasserted AFTER the clock stop (clean end-of-frame)
@@ -31,7 +32,7 @@ module spi_swrst_ctrl (
   input  logic prst_n,
   input  logic swrst_write,      // 1-cycle pulse: write 1 to SPI_CTRL.SWRST
   output logic rst_busy,         // SPI_STAT.RST_BUSY
-  output logic bus_clr,          // clear bus-side pointer / pipeline / SPI_IS
+  output logic bus_clr,          // clear bus-side FIFO pointer / pipeline, until RST_BUSY falls
 
   // SPI domain
   input  logic spi_clk,
@@ -56,8 +57,11 @@ module spi_swrst_ctrl (
     end
   end
 
-  // step 2: clear bus-side state at the moment the request is issued
-  assign bus_clr = req_pulse;
+  // step 2: clear bus-side state when the request is issued, and keep it
+  // cleared until RST_BUSY falls. By then the SPI side has been cleared
+  // too, so the bus side never compares its new FIFO pointer against an
+  // old SPI-side pointer (bug B15).
+  assign bus_clr = req_pulse || rst_busy;
 
   // ---------------- request: bus -> SPI ----------------
   logic req_pulse_spi;

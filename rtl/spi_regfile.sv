@@ -165,8 +165,10 @@ module spi_regfile
   assign tx_wm = (32'(tx_level) <= 32'(r_tx_wm_lvl));          // space available
   assign rx_wm = (32'(rx_level) >= 32'(r_rx_wm_lvl)) && (rx_level != '0);
 
-  assign tx_dreq = tx_wm && r_txdmaen;
-  assign rx_dreq = rx_wm && r_rxdmaen;
+ // No DMA request while RST_BUSY = 1 (Spec 7.5 step 6): the data ports
+  // answer PSLVERR during the reset.
+  assign tx_dreq = tx_wm && r_txdmaen && !rst_busy;
+  assign rx_dreq = rx_wm && r_rxdmaen && !rst_busy;
 
   // ---------------- register writes ----------------
   logic cfg_wr_hit;

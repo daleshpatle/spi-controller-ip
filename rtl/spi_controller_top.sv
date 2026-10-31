@@ -156,37 +156,30 @@ module spi_controller_top
     .spi_clr(spi_clr), .swrst_active(swrst_active)
   );
 
-  // FIFO flush requests must clear BOTH sides. The bus side clears
-  // immediately; the far side is cleared through an event synchronizer.
-  logic tx_flush_spi, rx_flush_spi;
-  // src_busy of the flush synchronizers is not needed: a flush requested
-  // while one is in flight is merged into it, never lost
+ // ---------------- asynchronous FIFOs ----------------
+  // A flush is applied inside the FIFO by stepping the read pointer, never
+  // by clearing it (bug B15). The TX flush is written on the bus, which is
+  // the TX FIFO's write side (w_flush); the RX flush on the bus, which is
+  // the RX FIFO's read side (r_flush). w_clr / r_clr are for SWRST only.
+  logic tx_flushed_spi;               // TX flush taken: the slave drops its staged word
+  // r_flushed of the RX FIFO is not needed: no RX word is held outside the FIFO
   /* verilator lint_off UNUSEDSIGNAL */
-  logic txflush_busy, rxflush_busy;
+  logic rx_flushed;
   /* verilator lint_on UNUSEDSIGNAL */
-  spi_event_sync u_txflush_sync (
-    .src_clk(pclk),        .src_rst_n(prst_n_s),    .src_pulse(tx_flush),
-    .src_busy(txflush_busy),
-    .dst_clk(spi_ref_clk), .dst_rst_n(spi_rst_n_s), .dst_pulse(tx_flush_spi)
-  );
-  spi_event_sync u_rxflush_sync (
-    .src_clk(pclk),        .src_rst_n(prst_n_s),    .src_pulse(rx_flush),
-    .src_busy(rxflush_busy),
-    .dst_clk(spi_ref_clk), .dst_rst_n(spi_rst_n_s), .dst_pulse(rx_flush_spi)
-  );
 
-  // ---------------- asynchronous FIFOs ----------------
   spi_async_fifo #(.WIDTH(DATA_WIDTH), .DEPTH(FIFO_DEPTH)) u_tx_fifo (
-    .wclk(pclk),        .wrst_n(prst_n_s),    .w_clr(bus_clr | tx_flush),
+    .wclk(pclk),        .wrst_n(prst_n_s),    .w_clr(bus_clr), .w_flush(tx_flush),
     .wen(tx_wen),       .wdata(tx_wdata),     .wfull(tx_full), .wlevel(tx_level_bus),
-    .rclk(spi_ref_clk), .rrst_n(spi_rst_n_s), .r_clr(spi_clr | tx_flush_spi),
+    .rclk(spi_ref_clk), .rrst_n(spi_rst_n_s), .r_clr(spi_clr), .r_flush(1'b0),
+    .r_flushed(tx_flushed_spi),
     .ren(tx_ren),       .rdata(tx_rdata),     .rempty(tx_empty), .rlevel(tx_level_spi)
   );
 
   spi_async_fifo #(.WIDTH(DATA_WIDTH), .DEPTH(FIFO_DEPTH)) u_rx_fifo (
-    .wclk(spi_ref_clk), .wrst_n(spi_rst_n_s), .w_clr(spi_clr | rx_flush_spi),
+    .wclk(spi_ref_clk), .wrst_n(spi_rst_n_s), .w_clr(spi_clr), .w_flush(1'b0),
     .wen(rx_wen),       .wdata(rx_wdata),     .wfull(rx_full), .wlevel(rx_level_spi),
-    .rclk(pclk),        .rrst_n(prst_n_s),    .r_clr(bus_clr | rx_flush),
+    .rclk(pclk),        .rrst_n(prst_n_s),    .r_clr(bus_clr), .r_flush(rx_flush),
+    .r_flushed(rx_flushed),
     .ren(rx_ren),       .rdata(rx_rdata),     .rempty(rx_empty), .rlevel(rx_level_bus)
   );
 
@@ -217,7 +210,7 @@ module spi_controller_top
     .spi_clk(spi_ref_clk), .spi_rst_n(spi_rst_n_s),
     .cfg(cfg_active), .en(en_spi), .swrst_active(swrst_active),
     .sclk_i(sclk_i), .mosi_i(mosi_i), .miso_o(s_miso), .miso_oe(s_miso_oe),
-    .cs_n_i(cs_n_i),
+    .cs_n_i(cs_n_i), .tx_flush(tx_flushed_spi),
     .tx_empty(tx_empty | ~cfg_active.mode), .tx_data(tx_rdata), .tx_ren(s_tx_ren),
     .rx_full(rx_full), .rx_wen(s_rx_wen), .rx_data(s_rx_data),
     .busy(s_busy), .evt_done(s_done), .evt_rx_overrun(s_rxovf),

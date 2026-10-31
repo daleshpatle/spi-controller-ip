@@ -60,6 +60,7 @@ module spi_slave_engine
   output logic                   tx_ren,
 
   // RX FIFO write port (SPI side)
+  input  logic                   tx_flush,        // TX flush taken (1 cycle): drop the staged word
   input  logic                   rx_full,
   output logic                   rx_wen,
   output logic [DATA_WIDTH-1:0]  rx_data,
@@ -320,12 +321,16 @@ module spi_slave_engine
   // Nothing is staged while the slave is off. A word staged before EN was
   // cleared stays staged (it is shifted out unseen in an ignored frame, and
   // its take is ignored), so it is sent in the next enabled frame.
+   // A TX flush drops the staged word too: it was popped from the FIFO, but
+  // it is flushed data (bug B14).
   always_ff @(posedge spi_clk or negedge spi_rst_n) begin
     if (!spi_rst_n) begin
       tx_hold     <= '0;
       tx_hold_vld <= 1'b0;
     end else if (swrst_active) begin
       tx_hold     <= '0;
+      tx_hold_vld <= 1'b0;
+    end else if (tx_flush) begin
       tx_hold_vld <= 1'b0;
     end else if (slv_en) begin
       if (!tx_hold_vld && !tx_empty) begin
