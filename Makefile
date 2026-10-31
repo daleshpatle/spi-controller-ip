@@ -85,5 +85,13 @@ r3:
 		$(VERILATOR) $(VFLAGS) --top-module tb_r3 \
 	 	   -f compile_r3.f -o sim_r3 --Mdir obj_r3
 		./obj_r3/sim_r3
-
-
+regs:
+		$(VERILATOR) $(VFLAGS) $(REGS_DEFS) --top-module tb_regs \
+		   -f compile_regs.f -o sim_regs --Mdir obj_regs
+		./obj_regs/sim_regs
+flush:
+		$(VERILATOR) $(VFLAGS) --top-module tb_flush \
+		    -f compile_flush.f -o sim_flush --Mdir obj_flush
+		./obj_flush/sim_flush +seed=1
+		./obj_flush/sim_flush +seed=2 +hp=5000 +hr=40000
+		./obj_flush/sim_flush +seed=3 +hp=40000 +hr=5000
